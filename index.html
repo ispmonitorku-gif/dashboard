@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OTDR Dashboard Generator</title>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<style>
+:root{--bg:#0b1220;--panel:#111b2e;--line:#263550;--text:#e8eef9;--muted:#9eb0ca;--accent:#46a3ff}
+*{box-sizing:border-box}body{margin:0;background:#f4f7fb;color:#182235;font:14px Arial,Helvetica,sans-serif}
+header{background:linear-gradient(135deg,#0b1220,#17345d);color:white;padding:24px 28px}
+h1{margin:0 0 6px;font-size:26px}.sub{color:#c7d5e9}
+main{max-width:1250px;margin:22px auto;padding:0 18px}
+.card{background:white;border:1px solid #dce4ef;border-radius:14px;padding:18px;margin-bottom:16px;box-shadow:0 5px 18px #12213a10}
+.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.stat{padding:14px;border-radius:11px;background:#f6f9fd;border:1px solid #e3eaf3}.stat b{display:block;font-size:22px;margin-top:5px}.muted{color:#6d7b90}
+label{display:block;font-weight:700;margin-bottom:6px}input,select{width:100%;padding:10px;border:1px solid #cbd6e5;border-radius:8px;background:white}
+button{border:0;border-radius:9px;padding:11px 16px;font-weight:700;cursor:pointer;background:#1769d2;color:#fff}
+button.secondary{background:#e9f1fb;color:#174d8f}.drop{border:2px dashed #9fb7d5;padding:26px;text-align:center;border-radius:12px;background:#f8fbff}
+.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}.hidden{display:none}
+table{border-collapse:collapse;width:100%;font-size:12px}th,td{border:1px solid #dce4ef;padding:6px 8px;text-align:left}th{background:#eaf1fa;position:sticky;top:0}.scroll{max-height:420px;overflow:auto}
+.status{margin-top:10px;padding:10px;border-radius:8px;background:#eef6ff;color:#194b7d}
+.legend{display:flex;flex-wrap:wrap;gap:7px}.chip{padding:6px 9px;border-radius:20px;font-size:12px;color:#111;border:1px solid #bbb}
+canvas{max-height:340px}
+@media(max-width:850px){.grid{grid-template-columns:repeat(2,1fr)}}@media(max-width:520px){.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header><h1>OTDR Dashboard Generator</h1><div class="sub">Upload Event Table OTDR → analisis event, tube/core, KPI, chart, dan Excel dashboard.</div></header>
+<main>
+<div class="card">
+  <div class="drop">
+    <b>Pilih file Event Table OTDR (.xlsx / .xls / .csv)</b><br><br>
+    <input id="file" type="file" accept=".xlsx,.xls,.csv">
+    <div class="muted" style="margin-top:9px">Semua proses dilakukan di browser; data tidak perlu dikirim ke server.</div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="grid">
+    <div><label>Jumlah core per tube</label><select id="tubeSize"><option>12</option><option selected>24</option><option>48</option></select></div>
+    <div><label>Batas event tinggi (dB)</label><input id="eventHigh" type="number" step="0.01" value="1.00"></div>
+    <div><label>Batas attenuation (dB/km)</label><input id="attLimit" type="number" step="0.001" value="0.350"></div>
+    <div><label>Wavelength default</label><input id="wave" type="number" value="1550"></div>
+  </div>
+  <div class="actions">
+    <button onclick="generate()">Generate Dashboard</button>
+    <button class="secondary" onclick="downloadTemplate()">Download template contoh</button>
+  </div>
+  <div id="status" class="status hidden"></div>
+</div>
+
+<div id="result" class="hidden">
+  <div class="card">
+    <div class="grid" id="stats"></div>
+  </div>
+  <div class="card"><h3>Warna Tube</h3><div id="legend" class="legend"></div></div>
+  <div class="card"><h3>Ringkasan Core</h3><div class="scroll"><table id="summaryTable"></table></div></div>
+  <div class="card">
+    <div style="display:flex;gap:10px;align-items:end;flex-wrap:wrap">
+      <div style="min-width:230px;flex:1"><label>Pilih Core untuk OTDR Trace</label><select id="coreSelect" onchange="renderTrace()"></select></div>
+      <div style="min-width:160px"><label>Tampilkan event</label><select id="eventFilter" onchange="renderTrace()"><option value="all">Semua</option><option value="high">High / Critical</option></select></div>
+    </div>
+    <canvas id="traceChart"></canvas>
+    <div class="muted">Trace menampilkan loss event berdasarkan jarak KM dari Event Table. Klik titik untuk melihat detail event.</div>
+  </div>
+  <div class="card"><h3>Event Loss Terbesar</h3><canvas id="eventChart"></canvas></div>
+  <div class="card"><h3>Attenuation per Core</h3><canvas id="attChart"></canvas></div>
+  <div class="card"><h3>Event Detail Interaktif</h3><div class="scroll"><table id="eventTable"></table></div></div>
+  <div class="card">
+    <h3>Download</h3>
+    <div class="actions"><button onclick="exportExcel()">Download Excel Dashboard</button></div>
+    <div class="muted" style="margin-top:9px">Workbook berisi Dashboard, Core Summary, Event Detail, Tube Map, dan Raw Data. Chart ikut dimasukkan ke sheet Dashboard.</div>
+  </div>
+</div>
+</main>
+
+<script>
+let DATA=null, charts={};
+const COLORS=[
+"#2f6fed","#ff7f0e","#2ca02c","#d62728","#9467bd","#8c564b",
+"#e377c2","#7f7f7f","#bcbd22","#17becf","#1f77b4","#ffbb78"
+];
+const esc=s=>String(s??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]));
+
+function setStatus(s){let e=document.getElementById("status");e.classList.remove("hidden");e.textContent=s}
+
+document.getElementById("file").addEventListener("change",async e=>{
+  if(!e.target.files[0])return;
+  setStatus("File siap. Klik Generate Dashboard.");
+});
+
+async function readFile(file){
+  const buf=await file.arrayBuffer();
+  const wb=XLSX.read(buf,{type:"array",cellDates:true});
+  const ws=wb.Sheets[wb.SheetNames[0]];
+  return {wb, rows:XLSX.utils.sheet_to_json(ws,{header:1,defval:null,raw:true})};
+}
+
+function num(v){let x=Number(v);return Number.isFinite(x)?x:null}
+function findHeader(rows){
+  for(let r=0;r<Math.min(rows.length,20);r++){
+    const a=rows[r].map(v=>String(v??"").trim().toLowerCase());
+    if(a.includes("file") && a.some(x=>x.includes("length")) && a.some(x=>x.includes("attenuation")))
+      return r;
+  }
+  return 4;
+}
+function parse(rows){
+  const hr=findHeader(rows), h=rows[hr].map(v=>String(v??"").trim());
+  const fileI=h.findIndex(x=>x.toLowerCase()==="file");
+  const coreI=h.findIndex(x=>x.toLowerCase()==="fiber" || x.toLowerCase()==="core");
+  const waveI=h.findIndex(x=>x.toLowerCase().startsWith("wavelength"));
+  const lossI=h.findIndex(x=>x.toLowerCase().startsWith("loss"));
+  const lenI=h.findIndex(x=>x.toLowerCase().startsWith("length"));
+  const attI=h.findIndex(x=>x.toLowerCase().startsWith("attenuation"));
+  const dist=[];
+  for(let c=0;c<h.length;c++){let x=num(h[c]);if(c>attI && x!==null)dist.push({col:c,km:x});}
+  const cores=[];
+  for(let r=hr+1;r<rows.length;r++){
+    const file=rows[r][fileI];
+    if(!file || !String(file).toLowerCase().includes(".sor"))continue;
+    const coreRaw=rows[r][coreI];
+    const fileCore=(String(file).match(/(?:core|c)[_\s-]*(\d+)/i)||[])[1];
+    const core=parseInt(fileCore ?? String(coreRaw??"").replace(/\D/g,""),10);
+    const wave=num(rows[r][waveI]) ?? Number(document.getElementById("wave").value);
+    const loss=num(rows[r][lossI]), length=num(rows[r][lenI]), att=num(rows[r][attI]);
+    const events=[];
+    for(const d of dist){let v=num(rows[r][d.col]); if(v!==null)events.push({distance:d.km,loss:v});}
+    cores.push({file:String(file).trim(),core:Number.isFinite(core)?core:null,wavelength:wave,loss,length,attenuation:att,events});
+  }
+  return {headerRow:hr,header:h,rows,cores,distances:dist};
+}
+function tubeInfo(core,size){
+  if(!Number.isFinite(core))return {tube:"-",color:"#ddd",name:"Unknown"};
+  const t=Math.floor((core-1)/size)+1;
+  return {tube:"Tube "+t,color:COLORS[(t-1)%COLORS.length],name:"Tube "+t};
+}
+
+function renderTrace(){
+  if(!DATA||!DATA.cores.length)return;
+  const idx=Number(document.getElementById("coreSelect").value)||0;
+  const c=DATA.cores[idx], high=Number(document.getElementById("eventHigh").value);
+  const filter=document.getElementById("eventFilter").value;
+  let pts=c.events.filter(e=>filter==="all"||e.loss>=high);
+  const ctx=document.getElementById("traceChart");
+  if(charts.trace)charts.trace.destroy();
+  charts.trace=new Chart(ctx,{type:"line",data:{datasets:[{
+    label:`Core ${c.core} — ${c.file}`,
+    data:pts.map(e=>({x:e.distance,y:e.loss})),
+    parsing:false,showLine:false,pointRadius:5,pointHoverRadius:8
+  }]},options:{responsive:true,interaction:{mode:"nearest",intersect:true},
+    scales:{x:{type:"linear",title:{display:true,text:"Distance (km)"},min:0,max:c.length||undefined},
+            y:{title:{display:true,text:"Event Loss (dB)"}}},
+    plugins:{tooltip:{callbacks:{label:x=>` ${x.parsed.x.toFixed(3)} km — ${x.parsed.y.toFixed(3)} dB`}},
+      legend:{display:true}}
+  }});
+  const evrows=pts.slice().sort((a,b)=>b.loss-a.loss).map(e=>{
+    const status=e.loss>=high*1.5?"CRITICAL":e.loss>=high?"HIGH":"NORMAL";
+    return `<tr><td>${c.core}</td><td>${e.distance.toFixed(3)}</td><td>${e.loss.toFixed(3)}</td><td>${status}</td></tr>`;
+  }).join("");
+  document.getElementById("eventTable").innerHTML=
+    "<thead><tr><th>Core</th><th>Distance (km)</th><th>Event Loss (dB)</th><th>Status</th></tr></thead><tbody>"+evrows+"</tbody>";
+}
+
+function render(data){
+  DATA=data;
+  const sel=document.getElementById("coreSelect");
+  sel.innerHTML=data.cores.map((c,i)=>`<option value="${i}">Core ${esc(c.core)} — ${esc(c.file)}</option>`).join("");
+  const n=data.cores.length, totalEvents=data.cores.reduce((a,c)=>a+c.events.length,0);
+  const lengths=data.cores.map(c=>c.length).filter(x=>x!=null), atts=data.cores.map(c=>c.attenuation).filter(x=>x!=null);
+  const maxL=lengths.length?Math.max(...lengths):0, avgA=atts.length?atts.reduce((a,b)=>a+b,0)/atts.length:0;
+  const high=Number(document.getElementById("eventHigh").value);
+  const badEvents=data.cores.flatMap(c=>c.events.map(e=>({...e,file:c.file,core:c.core}))).filter(e=>e.loss>=high).length;
+  const badAtt=atts.filter(x=>x>Number(document.getElementById("attLimit").value)).length;
+  document.getElementById("stats").innerHTML=[
+    ["Core",n],["Panjang maksimum",maxL.toFixed(3)+" km"],["Avg attenuation",avgA.toFixed(3)+" dB/km"],["Event ≥ "+high.toFixed(2)+" dB",badEvents],["Core attenuation tinggi",badAtt]
+  ].map(x=>`<div class="stat"><span class="muted">${esc(x[0])}</span><b>${esc(x[1])}</b></div>`).join("");
+  const size=Number(document.getElementById("tubeSize").value);
+  const tubes=[...new Set(data.cores.map(c=>tubeInfo(c.core,size).tube))];
+  document.getElementById("legend").innerHTML=tubes.map(t=>{
+    const ix=parseInt(t.replace(/\D/g,""),10)-1;return `<span class="chip" style="background:${COLORS[ix%COLORS.length]}">${esc(t)}</span>`;
+  }).join("");
+  const rows=data.cores.map(c=>{
+    const ti=tubeInfo(c.core,size), maxE=c.events.length?Math.max(...c.events.map(e=>e.loss)):0, cnt=c.events.filter(e=>e.loss>=high).length;
+    return `<tr><td>${esc(c.file)}</td><td>${esc(c.core)}</td><td><span class="chip" style="background:${ti.color}">${ti.tube}</span></td><td>${c.wavelength??""}</td><td>${c.loss??""}</td><td>${c.length??""}</td><td>${c.attenuation??""}</td><td>${maxE.toFixed(3)}</td><td>${cnt}</td></tr>`;
+  }).join("");
+  document.getElementById("summaryTable").innerHTML="<thead><tr><th>File</th><th>Core</th><th>Tube</th><th>Wavelength</th><th>Total Loss dB</th><th>Length km</th><th>Attenuation dB/km</th><th>Max Event dB</th><th>Event ≥ limit</th></tr></thead><tbody>"+rows+"</tbody>";
+  const labels=data.cores.map(c=>"C"+c.core), ev=data.cores.map(c=>c.events.length?Math.max(...c.events.map(e=>e.loss)):0), at=data.cores.map(c=>c.attenuation??0);
+  Object.values(charts).forEach(x=>x.destroy());
+  charts.event=new Chart(document.getElementById("eventChart"),{type:"bar",data:{labels,datasets:[{label:"Max Event (dB)",data:ev}]},options:{responsive:true,plugins:{legend:{display:false}}}});
+  charts.att=new Chart(document.getElementById("attChart"),{type:"bar",data:{labels,datasets:[{label:"Attenuation (dB/km)",data:at}]},options:{responsive:true,plugins:{legend:{display:false}}}});
+  document.getElementById("result").classList.remove("hidden");
+  renderTrace();
+}
+async function generate(){
+  const f=document.getElementById("file").files[0];
+  if(!f){setStatus("Pilih file OTDR terlebih dahulu.");return}
+  try{setStatus("Membaca dan menganalisis file..."); const x=await readFile(f); const d=parse(x.rows); if(!d.cores.length)throw Error("Tidak menemukan baris Core/File .sor."); DATA.raw=x.wb; render(d); setStatus("Dashboard berhasil dibuat dari "+d.cores.length+" core.");}
+  catch(e){setStatus("Gagal: "+e.message)}
+}
+function styleCell(cell,fill,fontColor="FFFFFF",bold=true){cell.fill={type:"pattern",pattern:"solid",fgColor:{argb:fill.replace("#","").toUpperCase()}};cell.font={bold,color:fontColor};cell.alignment={vertical:"middle"}}
+async function exportExcel(){
+  if(!DATA)return;
+  setStatus("Menyusun workbook Excel...");
+  const wb=new ExcelJS.Workbook(); wb.creator="OTDR Dashboard Generator"; wb.created=new Date();
+  const ws=wb.addWorksheet("Dashboard");
+  ws.mergeCells("A1:J1"); ws.getCell("A1").value="OTDR DASHBOARD"; styleCell(ws.getCell("A1"),"17345D"); ws.getCell("A1").font={bold:true,color:"FFFFFF",size:18}; ws.getRow(1).height=30;
+  ws.getCell("A2").value="Generated: "+new Date().toLocaleString("id-ID");
+  const c=DATA.cores, high=Number(document.getElementById("eventHigh").value), attLim=Number(document.getElementById("attLimit").value), size=Number(document.getElementById("tubeSize").value);
+  const vals={core:c.length,length:Math.max(...c.map(x=>x.length||0)),avg:c.reduce((a,x)=>a+(x.attenuation||0),0)/Math.max(c.length,1),events:c.reduce((a,x)=>a+x.events.filter(e=>e.loss>=high).length,0)};
+  [["A4","Jumlah Core",vals.core],["C4","Max Length (km)",vals.length],["E4","Avg Attenuation",vals.avg],["G4","Event ≥ limit",vals.events]].forEach(([cell,label,val])=>{ws.getCell(cell).value=label;styleCell(ws.getCell(cell),"2F6FED");let p=ws.getCell(cell);ws.getCell(p.row,p.column+1).value=val;ws.getCell(p.row,p.column+1).font={bold:true,size:14}});
+  const s=wb.addWorksheet("Core Summary"); const heads=["File","Core","Tube","Tube Color","Wavelength","Loss dB","Length km","Attenuation dB/km","Max Event dB","Event >= Limit"];
+  heads.forEach((h,i)=>{s.getCell(1,i+1).value=h;styleCell(s.getCell(1,i+1),"17345D")});
+  c.forEach((x,r)=>{const ti=tubeInfo(x.core,size), vals=[x.file,x.core,ti.tube,ti.color,x.wavelength,x.loss,x.length,x.attenuation,x.events.length?Math.max(...x.events.map(e=>e.loss)):0,x.events.filter(e=>e.loss>=high).length]; vals.forEach((v,i)=>s.getCell(r+2,i+1).value=v);s.getCell(r+2,4).fill={type:"pattern",pattern:"solid",fgColor:{argb:ti.color.replace("#","").toUpperCase()}}});
+  s.autoFilter={from:"A1",to:"J"+(c.length+1)}; s.views=[{state:"frozen",ySplit:1}];
+  s.addTable({name:"CoreSummaryTable",ref:"A1:J"+(c.length+1),headerRow:true,totalsRow:false,style:{theme:"TableStyleMedium2",showRowStripes:true}});
+  s.getColumn(8).numFmt="0.000"; s.getColumn(9).numFmt="0.000";
+  s.addConditionalFormatting({ref:"H2:H"+(c.length+1),rules:[{type:"cellIs",operator:"greaterThanOrEqual",formula:[String(high)],style:{font:{color:{argb:"9C0006"},bold:true},fill:{type:"pattern",pattern:"solid",fgColor:{argb:"FFC7CE"}}}}]});
+  s.addConditionalFormatting({ref:"H2:H"+(c.length+1),rules:[{type:"cellIs",operator:"greaterThanOrEqual",formula:[String(high*1.5)],style:{font:{color:{argb:"FFFFFF"},bold:true},fill:{type:"pattern",pattern:"solid",fgColor:{argb:"C00000"}}}}]});
+  s.addConditionalFormatting({ref:"H2:H"+(c.length+1),rules:[{type:"colorScale",cfvo:[{type:"min"},{type:"percentile",value:50},{type:"max"}],color:[{argb:"63BE7B"},{argb:"FFEB84"},{argb:"F8696B"}]}]});
+  s.addConditionalFormatting({ref:"H2:H"+(c.length+1),rules:[{type:"expression",formula:["H2>=1.5*"+high],style:{font:{color:{argb:"9C0006"},bold:true}}}]});
+  s.addConditionalFormatting({ref:"H2:H"+(c.length+1),rules:[{type:"cellIs",operator:"greaterThan",formula:[String(attLim)],style:{font:{color:{argb:"9C0006"},bold:true},fill:{type:"pattern",pattern:"solid",fgColor:{argb:"FFC7CE"}}}}]});
+  const ev=wb.addWorksheet("Event Detail"); ["File","Core","Tube","Distance km","Event Loss dB","Status"].forEach((h,i)=>{ev.getCell(1,i+1).value=h;styleCell(ev.getCell(1,i+1),"17345D")});
+  let rr=2;c.forEach(x=>{const ti=tubeInfo(x.core,size);x.events.forEach(e=>{[x.file,x.core,ti.tube,e.distance,e.loss,e.loss>=high?"HIGH":"NORMAL"].forEach((v,i)=>ev.getCell(rr,i+1).value=v);if(e.loss>=high)ev.getCell(rr,6).font={bold:true,color:"C62828"};rr++})});
+  ev.autoFilter={from:"A1",to:"F"+(rr-1)};ev.views=[{state:"frozen",ySplit:1}];
+  if(rr>2)ev.addTable({name:"EventDetailTable",ref:"A1:F"+(rr-1),headerRow:true,style:{theme:"TableStyleMedium4",showRowStripes:true}});
+  ev.getColumn(4).numFmt="0.000"; ev.getColumn(5).numFmt="0.000";
+  ev.addConditionalFormatting({ref:"E2:E"+(rr-1),rules:[{type:"cellIs",operator:"greaterThanOrEqual",formula:[String(high)],style:{font:{color:{argb:"9C0006"},bold:true},fill:{type:"pattern",pattern:"solid",fgColor:{argb:"FFC7CE"}}}}]});
+  const tm=wb.addWorksheet("Tube Map");["Tube","Core","File","Length km","Attenuation dB/km","Max Event dB"].forEach((h,i)=>{tm.getCell(1,i+1).value=h;styleCell(tm.getCell(1,i+1),"17345D")});
+  c.forEach((x,r)=>{const ti=tubeInfo(x.core,size),v=[ti.tube,x.core,x.file,x.length,x.attenuation,x.events.length?Math.max(...x.events.map(e=>e.loss)):0];v.forEach((z,i)=>tm.getCell(r+2,i+1).value=z);tm.getCell(r+2,1).fill={type:"pattern",pattern:"solid",fgColor:{argb:ti.color.replace("#","").toUpperCase()}}});
+  tm.addTable({name:"TubeMapTable",ref:"A1:F"+(c.length+1),headerRow:true,style:{theme:"TableStyleMedium9",showRowStripes:true}});
+  const info=wb.addWorksheet("README");
+  info.getCell("A1").value="OTDR Dashboard — Petunjuk"; info.getCell("A1").font={bold:true,size:16};
+  info.getCell("A3").value="Core"; info.getCell("B3").value="Nomor core diambil dari nama File seperti Core_20.sor.";
+  info.getCell("A4").value="Tube"; info.getCell("B4").value="Tube dihitung berurutan dari nomor core sesuai jumlah core/tube.";
+  info.getCell("A5").value="Event HIGH"; info.getCell("B5").value="Event loss >= threshold pada dashboard.";
+  info.getCell("A6").value="Event CRITICAL"; info.getCell("B6").value="Event loss >= 1.5 × threshold.";
+  info.getCell("A7").value="Attenuation HIGH"; info.getCell("B7").value="Attenuation > batas yang dipilih.";
+  info.getColumn(1).width=24; info.getColumn(2).width=80;
+  const raw=wb.addWorksheet("Raw Data"); DATA.rows.forEach((row,ri)=>row.forEach((v,ci)=>raw.getCell(ri+1,ci+1).value=v instanceof Date?v:v??null));
+  [ws,s,ev,tm,raw].forEach(sh=>{sh.eachRow(row=>row.eachCell(cell=>{cell.alignment={vertical:"middle",wrapText:false}}));sh.columns.forEach(col=>{col.width=Math.min(28,Math.max(10,(col.header?String(col.header).length:10)+2))})});
+  // Insert the two dashboard charts as PNG images.
+  for(const [key,canvas] of [["event",document.getElementById("eventChart")],["att",document.getElementById("attChart")]]){
+    const img=canvas.toDataURL("image/png",1.0); const id=wb.addImage({base64:img,extension:"png"});
+    ws.addImage(id,{tl:{col:key==="event"?0:5,row:key==="event"?8:8},ext:{width:520,height:300}});
+  }
+  ws.getColumn(1).width=24;ws.getColumn(2).width=14;ws.getColumn(3).width=16;ws.getColumn(4).width=16;ws.getColumn(5).width=15;ws.getColumn(6).width=15;ws.getColumn(7).width=16;ws.getColumn(8).width=22;ws.getColumn(9).width=18;ws.getColumn(10).width=17;
+  const blob=await wb.xlsx.writeBuffer(); const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([blob],{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}));a.download="OTDR_Dashboard.xlsx";a.click();setStatus("Excel dashboard selesai dibuat.");
+}
+function downloadTemplate(){
+  const a=document.createElement("a"); const wb=XLSX.utils.book_new();
+  const rows=[["","","","","","","","Distance, km"],["","File","Fiber","Wavelength, ns","Loss, dB","Length, km","Attenuation, dB/km",0,2.0,5.0,10.0],["","Core_1.sor",1,1550,1.2,10,0.12,null,0.05,0.2,0.8]];
+  const ws=XLSX.utils.aoa_to_sheet(rows);XLSX.utils.book_append_sheet(wb,ws,"Event Table");XLSX.writeFile(wb,"OTDR_Event_Table_Template.xlsx");
+}
+</script>
+</body></html>
